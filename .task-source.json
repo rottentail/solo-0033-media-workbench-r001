@@ -1,0 +1,284 @@
+{
+  "task_source_schema_version": 1,
+  "cc_feedback_profile": "cc-feedback-2611",
+  "project_domain": "游戏、图形与多媒体",
+  "project_subdirection": "音视频处理",
+  "supported_task_types": [
+    "Bugfix",
+    "代码重构",
+    "质量保障"
+  ],
+  "type_coverage": {
+    "功能开发": {
+      "status": "unsupported",
+      "reason": "当前只评估 Bugfix 基线，尚未完成该类型容量审核"
+    },
+    "Bugfix": {
+      "status": "supported",
+      "reason": "真实具备不可变计划、逐次片段缓存、租约代次隔离和可恢复发布；具体困难题须通过最窄修复及源码准入，不能以项目画像替代难度证据"
+    },
+    "代码重构": {
+      "status": "supported",
+      "reason": "渲染状态机、POSIX缓存锁、媒体编码和发布拥有真实独立调用边界，可在保持恢复语义前提下重构"
+    },
+    "功能优化": {
+      "status": "unsupported",
+      "reason": "当前只评估 Bugfix 基线，尚未完成该类型容量审核"
+    },
+    "依赖升级与迁移": {
+      "status": "unsupported",
+      "reason": "当前只评估 Bugfix 基线，尚未完成该类型容量审核"
+    },
+    "质量保障": {
+      "status": "supported",
+      "reason": "HTTP编辑、失效租约接管、缓存损坏、取消和进程退出均有可执行独立验证边界"
+    },
+    "项目维护": {
+      "status": "unsupported",
+      "reason": "当前只评估 Bugfix 基线，尚未完成该类型容量审核"
+    },
+    "技术讨论": {
+      "status": "unsupported",
+      "reason": "当前只评估 Bugfix 基线，尚未完成该类型容量审核"
+    },
+    "问题排查与诊断": {
+      "status": "unsupported",
+      "reason": "当前只评估 Bugfix 基线，尚未完成该类型容量审核"
+    },
+    "部署运维": {
+      "status": "unsupported",
+      "reason": "当前只评估 Bugfix 基线，尚未完成该类型容量审核"
+    },
+    "泛Agent需求": {
+      "status": "unsupported",
+      "reason": "当前只评估 Bugfix 基线，尚未完成该类型容量审核"
+    }
+  },
+  "prompt_contract": {
+    "schema_version": 1,
+    "mode": "baseline-only",
+    "baseline_tier": "standard",
+    "generation_scope": {
+      "mode": "explicit",
+      "task_types": [
+        "Bugfix"
+      ],
+      "basis": "用户授权扩展原健康基线以增加困难Bugfix容量；不把容量候选自动登记为已准入题"
+    },
+    "minimum_active_prompts": {
+      "Bugfix": 0
+    },
+    "minimum_anchors": {}
+  },
+  "entities": [
+    {
+      "id": "asset",
+      "label": "asset",
+      "relations": [],
+      "invariants": [
+        "素材内容须保持一致"
+      ]
+    },
+    {
+      "id": "project",
+      "label": "project",
+      "relations": [],
+      "invariants": [
+        "修订随片段变更"
+      ]
+    },
+    {
+      "id": "clip",
+      "label": "clip",
+      "relations": [],
+      "invariants": [
+        "片段端点在素材范围内"
+      ]
+    },
+    {
+      "id": "render",
+      "label": "render",
+      "relations": [],
+      "invariants": [
+        "快照保留提交时修订"
+      ]
+    },
+    {
+      "id": "render_job",
+      "label": "持久化渲染任务",
+      "relations": [
+        "render",
+        "clip"
+      ],
+      "invariants": [
+        "计划创建后不随项目编辑变化",
+        "租约所有者和代次同时匹配才可改变运行状态",
+        "取消及完成后不可再次接管"
+      ]
+    },
+    {
+      "id": "segment_checkpoint",
+      "label": "有序片段检查点",
+      "relations": [
+        "render_job"
+      ],
+      "invariants": [
+        "每个剪辑位置保留独立检查点",
+        "缓存复用不合并重复片段",
+        "恢复必须重新校验缓存字节"
+      ]
+    },
+    {
+      "id": "segment_manifest",
+      "label": "片段字节清单",
+      "relations": [
+        "asset",
+        "segment_checkpoint"
+      ],
+      "invariants": [
+        "缓存身份包含源哈希、裁切、增益、音轨和输出版本",
+        "跨进程锁下成对替换字节和清单"
+      ]
+    },
+    {
+      "id": "publication_intent",
+      "label": "产物发布意图",
+      "relations": [
+        "render_job"
+      ],
+      "invariants": [
+        "发布只能由当前租约完成",
+        "失败与取消不自动删除公共目标路径",
+        "进程中断后的自有已链接文件可核验后接管",
+        "损坏的已发布产物需要操作者检查"
+      ]
+    }
+  ],
+  "state_machines": [
+    {
+      "subject": "render_job",
+      "states": [
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "transitions": [
+        "queued->running",
+        "running(expired)->running(new epoch)",
+        "running->completed",
+        "running->failed",
+        "queued->cancelled",
+        "running->cancelled",
+        "failed->queued"
+      ],
+      "invariants": [
+        "代次单调递增",
+        "终态取消不可重试",
+        "失败必须显式重试",
+        "完成记录和目标归属对应"
+      ]
+    },
+    {
+      "subject": "segment_checkpoint",
+      "states": [
+        "pending",
+        "ready"
+      ],
+      "transitions": [
+        "pending->ready",
+        "ready->ready(revalidated or rebuilt)"
+      ],
+      "invariants": [
+        "检查点就绪不意味着缓存字节永远有效",
+        "同缓存可对应多个剪辑位置"
+      ]
+    }
+  ],
+  "capability_families": [
+    {
+      "family": "时间线编辑与修订",
+      "occupied_by": [
+        "timeline.replace",
+        "timeline.snapshot"
+      ],
+      "available": true
+    },
+    {
+      "family": "媒体剪辑实例到缓存字节",
+      "occupied_by": [
+        "planner.cache_key",
+        "SegmentCache.ensure",
+        "encoder.segment"
+      ],
+      "available": true
+    },
+    {
+      "family": "渲染租约与进程接管",
+      "occupied_by": [
+        "jobs.claim",
+        "jobs.require",
+        "worker.run"
+      ],
+      "available": true
+    },
+    {
+      "family": "可恢复产物发布",
+      "occupied_by": [
+        "jobs.artifact",
+        "publication.complete",
+        "publication.cancel"
+      ],
+      "available": true
+    }
+  ],
+  "extension_seams": [
+    {
+      "id": "timeline-edit",
+      "anchor": "timeline.replace",
+      "entry": "POST /projects/{id}/timeline",
+      "distinct_outcome": "原子批量编辑及修订冲突",
+      "mechanism": "optimistic_revision"
+    },
+    {
+      "id": "media-cache",
+      "anchor": "SegmentCache.ensure",
+      "entry": "POST /render-jobs/{id}/run",
+      "distinct_outcome": "校验复用或重建片段并保持有序实例",
+      "mechanism": "content_addressed_media"
+    },
+    {
+      "id": "worker-resume",
+      "anchor": "worker.run",
+      "entry": "POST /render-jobs/{id}/run",
+      "distinct_outcome": "租约过期后恢复原计划并隔离旧工作进程",
+      "mechanism": "lease_fencing"
+    },
+    {
+      "id": "artifact-publish",
+      "anchor": "publication.complete",
+      "entry": "POST /render-jobs/{id}/run",
+      "distinct_outcome": "中断后的产物归属恢复及并发目标保护",
+      "mechanism": "recoverable_publication"
+    }
+  ],
+  "tension_points": [
+    {
+      "workflow_id": "timeline-edit",
+      "description": "批量编辑必须原子生效，同时不能覆盖其他编辑者的新修订",
+      "observable_failure": "失败编辑部分落盘或陈旧编辑覆盖新时间线"
+    },
+    {
+      "workflow_id": "media-render",
+      "description": "重复素材复用编码字节，但各次裁切、增益和位置必须独立",
+      "observable_failure": "成片丢片段、错音量或受后续编辑影响"
+    },
+    {
+      "workflow_id": "resumable-render",
+      "description": "恢复必须复用已完成工作，同时识别损坏缓存和过期所有者，且不能覆盖其他任务产物",
+      "observable_failure": "旧工作进程覆盖新状态，恢复误认损坏片段或清理别人的文件"
+    }
+  ],
+  "prompt_anchors": []
+}

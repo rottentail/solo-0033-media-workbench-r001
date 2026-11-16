@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "name": "solo-0033-media-workbench",
+  "project_name": "solo-0033-media-workbench",
+  "project_shape": "backend",
+  "modules": [
+    {
+      "id": "assets",
+      "path": "mediaworkbench/assets.py",
+      "responsibility": "媒体探测与内容指纹"
+    },
+    {
+      "id": "db",
+      "path": "mediaworkbench/db.py",
+      "responsibility": "SQLite兼容表结构和短写事务"
+    },
+    {
+      "id": "timeline",
+      "path": "mediaworkbench/timeline.py",
+      "responsibility": "有序编辑、乐观修订与短读快照"
+    },
+    {
+      "id": "planner",
+      "path": "mediaworkbench/planner.py",
+      "responsibility": "不可变逐次剪辑计划和缓存身份"
+    },
+    {
+      "id": "encoder",
+      "path": "mediaworkbench/encoder.py",
+      "responsibility": "逐段归一化和有序拼接"
+    },
+    {
+      "id": "jobs",
+      "path": "mediaworkbench/jobs.py",
+      "responsibility": "持久化租约、代次和检查点状态机"
+    },
+    {
+      "id": "segment_cache",
+      "path": "mediaworkbench/segment_cache.py",
+      "responsibility": "跨进程互斥、片段字节及校验清单"
+    },
+    {
+      "id": "worker",
+      "path": "mediaworkbench/worker.py",
+      "responsibility": "中断恢复、租约续期和分段执行"
+    },
+    {
+      "id": "publication",
+      "path": "mediaworkbench/publication.py",
+      "responsibility": "文件归属与数据库完成状态协调"
+    },
+    {
+      "id": "renders",
+      "path": "mediaworkbench/renders.py",
+      "responsibility": "同步与持久化导出公共服务"
+    },
+    {
+      "id": "server",
+      "path": "mediaworkbench/server.py",
+      "responsibility": "JSON HTTP接口和连接寿命"
+    },
+    {
+      "id": "tools",
+      "path": "mediaworkbench/tools.py",
+      "responsibility": "有界子进程及取消检查"
+    }
+  ],
+  "workflows": [
+    {
+      "id": "timeline-edit",
+      "name": "素材登记与原子时间线编辑",
+      "entry": "POST /projects/{id}/timeline",
+      "steps": [
+        "探测素材并保存哈希",
+        "校验逐次裁切及预期修订",
+        "短事务原子替换和读取新修订"
+      ],
+      "success": "返回新修订的完整有序时间线",
+      "failure": "非法片段或陈旧修订整批拒绝",
+      "verification": "python3 -m mediaworkbench.check --workflow timeline",
+      "module_ids": [
+        "server",
+        "assets",
+        "tools",
+        "timeline",
+        "db"
+      ]
+    },
+    {
+      "id": "media-render",
+      "name": "冻结并导出规范化成片",
+      "entry": "POST /renders",
+      "steps": [
+        "冻结一致时间线并校验素材",
+        "逐次规划及校验或编码片段",
+        "有序拼接并保护目标文件发布"
+      ],
+      "success": "返回完成MP4及冻结修订",
+      "failure": "记录失败，保留可核对的已发布产物意图，不删除公共目标路径",
+      "verification": "python3 -m mediaworkbench.check --workflow render",
+      "module_ids": [
+        "server",
+        "renders",
+        "timeline",
+        "planner",
+        "jobs",
+        "worker",
+        "segment_cache",
+        "encoder",
+        "publication",
+        "db",
+        "tools"
+      ]
+    },
+    {
+      "id": "resumable-render",
+      "name": "持久化分段任务接管和取消",
+      "entry": "POST /render-jobs/{id}/run",
+      "steps": [
+        "接管排队或租约过期任务并增加代次",
+        "续期并复验检查点及损坏缓存",
+        "记录组装产物意图并发布或取消"
+      ],
+      "success": "原冻结计划恢复并完成，旧工作进程被隔离",
+      "failure": "租约丢失停止子进程；取消终止任务；其他失败可显式重试",
+      "verification": "python3 -m mediaworkbench.check --workflow recovery",
+      "module_ids": [
+        "server",
+        "renders",
+        "jobs",
+        "worker",
+        "planner",
+        "segment_cache",
+        "encoder",
+        "publication",
+        "db",
+        "tools"
+      ]
+    }
+  ],
+  "complexity": {
+    "mechanisms": [
+      "optimistic_revision",
+      "concurrency",
+      "immutable_plan",
+      "content_addressed_media",
+      "checkpoint_revalidation",
+      "lease_fencing",
+      "resource_lifecycle",
+      "error_propagation",
+      "recoverable_publication"
+    ]
+  }
+}
