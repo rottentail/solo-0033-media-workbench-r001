@@ -1,4 +1,5 @@
 """Verified immutable media segments, serialized across worker processes."""
+import fcntl
 import hashlib
 import json
 import os
@@ -59,41 +60,60 @@ class SegmentCache:
         return record
 
     def _encode(self, clip, media, tick):
-        encoder.segment(clip, media, tick)
-        if fingerprint(clip['path'], tick) != clip['fingerprint']:
-            raise ValueError('source changed during encoding')
-        info = json.loads(run('ffprobe', ['-v', 'error', '-show_streams',
-            '-show_format', '-of', 'json', str(media)], tick=tick))
-        video = next((s for s in info['streams'] if s['codec_type'] == 'video'), {})
-        audio = next((s for s in info['streams'] if s['codec_type'] == 'audio'), {})
-        duration = (clip['end_ms'] - clip['start_ms']) / 1000
-        if ((video.get('width'), video.get('height')) != (640, 360)
-                or video.get('r_frame_rate') != '25/1'
-                or audio.get('sample_rate') != '48000'
-                or audio.get('channels') != 2
-                or abs(float(info['format']['duration']) - duration) > .15):
-            raise ValueError('encoded segment does not match the media profile')
-        return {'key': clip['cache_key'], 'digest': digest(media, tick),
-                'size': media.stat().st_size}
+        # Encode beside the final name and move into place atomically, so a
+        # concurrent reader never observes a partially written segment.
+        with tempfile.NamedTemporaryFile(prefix='.encode-', suffix='.mp4',
+                                         dir=media.parent, delete=False) as handle:
+            staged = Path(handle.name)
+        try:
+            encoder.segment(clip, staged, tick)
+            if fingerprint(clip['path'], tick) != clip['fingerprint']:
+                raise ValueError('source changed during encoding')
+            info = json.loads(run('ffprobe', ['-v', 'error', '-show_streams',
+                '-show_format', '-of', 'json', str(staged)], tick=tick))
+            video = next((s for s in info['streams'] if s['codec_type'] == 'video'), {})
+            audio = next((s for s in info['streams'] if s['codec_type'] == 'audio'), {})
+            duration = (clip['end_ms'] - clip['start_ms']) / 1000
+            if ((video.get('width'), video.get('height')) != (640, 360)
+                    or video.get('r_frame_rate') != '25/1'
+                    or audio.get('sample_rate') != '48000'
+                    or audio.get('channels') != 2
+                    or abs(float(info['format']['duration']) - duration) > .15):
+                raise ValueError('encoded segment does not match the media profile')
+            record = {'key': clip['cache_key'], 'digest': digest(staged, tick),
+                      'size': staged.stat().st_size}
+            with open(staged, 'rb') as source:
+                os.fsync(source.fileno())
+            tick()
+            os.replace(staged, media)
+            return record
+        finally:
+            staged.unlink(missing_ok=True)
 
     def ensure(self, clip, tick):
         key = clip['cache_key']
         media, manifest = self.paths(key)
-        tick()
-        record = self._receipt(key)
-        if record is not None:
-            return media, record['digest'], True
-        record = self._encode(clip, media, tick)
-        receipt = json.dumps(record, sort_keys=True)
-        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
-                prefix='receipt-', suffix='.json', dir=self.root, delete=False) as handle:
-            handle.write(receipt)
-            handle.flush()
-            os.fsync(handle.fileno())
-            staged = Path(handle.name)
-        try:
-            tick()
-            os.replace(staged, manifest)
-        finally:
-            staged.unlink(missing_ok=True)
-        return media, record['digest'], False
+        # One encoder per identity across processes; waiters reuse the result.
+        with open(self.root / 'locks' / (key + '.lock'), 'a+b') as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                tick()
+                record = self._receipt(key)
+                if record is not None and verified(media, record['digest'], tick):
+                    return media, record['digest'], True
+                record = self._encode(clip, media, tick)
+                receipt = json.dumps(record, sort_keys=True)
+                with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                        prefix='receipt-', suffix='.json', dir=self.root, delete=False) as handle2:
+                    handle2.write(receipt)
+                    handle2.flush()
+                    os.fsync(handle2.fileno())
+                    staged = Path(handle2.name)
+                try:
+                    tick()
+                    os.replace(staged, manifest)
+                finally:
+                    staged.unlink(missing_ok=True)
+                return media, record['digest'], False
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

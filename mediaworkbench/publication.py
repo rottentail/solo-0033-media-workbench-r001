@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 from . import jobs
+from .segment_cache import verified
 
 
 def owned(source, destination):
@@ -29,14 +30,24 @@ def _publish_summary(summary):
     if summary['destination_present']:
         if not summary['destination'].is_file():
             raise ValueError('destination is not a file')
+        if not owned(summary['source'], summary['destination']):
+            # Another writer's file (or this job's own damaged earlier link)
+            # is never adopted and never replaced.
+            raise ValueError('destination is occupied by a file this job did not produce')
         return summary['destination']
-    os.link(summary['source'], summary['destination'])
+    try:
+        os.link(summary['source'], summary['destination'])
+    except FileExistsError:
+        raise ValueError('destination appeared during publication') from None
     return summary['destination']
 
 
 def complete(conn, token, tick=None):
     candidate = jobs.require(conn, token)
     summary = _output_summary(candidate)
+    if candidate['artifact_digest'] and not verified(
+            summary['source'], candidate['artifact_digest'], tick):
+        raise ValueError('assembled artifact does not match its recorded checksum')
     if tick is not None:
         tick()
     published = _publish_summary(summary)
@@ -55,15 +66,14 @@ def fail(conn, token, error):
 
 
 def cancel(conn, render_id):
+    # Cancellation is a database state change only. A public output name is
+    # never unlinked: another process may have replaced it concurrently, and
+    # an already-linked artifact stays inspectable through the recorded intent.
     with jobs.write(conn):
         job = jobs.get(conn, render_id)
         if job['status'] == 'completed':
             raise ValueError('completed render cannot be cancelled')
         if job['status'] in ('queued', 'running'):
-            if job['artifact_path']:
-                summary = _output_summary(job)
-                if summary['destination_present']:
-                    summary['destination'].unlink()
             conn.execute('UPDATE renders SET status=?,error=? WHERE id=?',
                          ('cancelled', 'cancelled by operator', render_id))
             conn.execute('UPDATE render_jobs SET epoch=epoch+1,owner=NULL,lease_until=0 '

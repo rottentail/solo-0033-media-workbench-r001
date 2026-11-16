@@ -7,27 +7,33 @@ import tempfile
 import time
 import uuid
 from . import encoder, jobs, planner, publication
-from .segment_cache import SegmentCache, digest
+from .segment_cache import SegmentCache, digest, verified
 
 
 def _progress_segments(conn, token, job, snapshot, cache, tick):
     saved = {row['position']: row for row in job['segments']}
-    reusable = {}
+    ensured = {}
     segments = []
     for position, clip in enumerate(snapshot['clips']):
         tick()
         key = clip['cache_key']
         checkpoint = saved.get(position)
-        if checkpoint is not None and checkpoint['status'] == 'ready':
-            path, _ = cache.paths(checkpoint['cache_key'])
-            if path.is_file():
-                if key not in reusable:
-                    reusable[key] = path
-                    segments.append(path)
+        if (checkpoint is not None and checkpoint['status'] == 'ready'
+                and checkpoint['cache_key'] == key and checkpoint['digest']):
+            path, _ = cache.paths(key)
+            if verified(path, checkpoint['digest'], tick):
+                ensured.setdefault(key, (path, checkpoint['digest']))
+                segments.append(path)
                 continue
-        path, checksum, _ = cache.ensure(clip, tick)
+            # Damaged or mismatched progress is rebuilt below.
+        if key in ensured:
+            path, checksum = ensured[key]
+        else:
+            path, checksum, _ = cache.ensure(clip, tick)
+            ensured[key] = (path, checksum)
         jobs.checkpoint(conn, token, position, key, checksum)
-        reusable[key] = path
+        # Every occurrence keeps its own position in the concat list, even
+        # when its encoded bytes are shared with another occurrence.
         segments.append(path)
     return segments
 
@@ -56,6 +62,11 @@ def run(conn, render_id, owner=None, lease_seconds=30):
         snapshot = json.loads(job['snapshot'])
         planner.verify_sources(snapshot, tick)
         cache = SegmentCache(job['cache_root'])
+        if (job['artifact_path'] and job['artifact_digest']
+                and verified(Path(job['artifact_path']), job['artifact_digest'], tick)):
+            # Assembly finished before the interruption; publish the verified
+            # artifact instead of re-encoding a sound result.
+            return publication.complete(conn, token, tick)
         segments = _progress_segments(conn, token, job, snapshot, cache, tick)
         planner.verify_sources(snapshot, tick)
         directory = _assembly_directory(job, token)
